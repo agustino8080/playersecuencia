@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secuencia de Videos con Reproductor HLS</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            padding: 20px;
+        }
+
+        /* Ya no usamos .video-section ni .video-link para mostrar la secuencia,
+           la secuencia es totalmente interna y oculta */
+
+        #player-container {
+            margin-top: 20px;
+            position: fixed; /* Flotante */
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            z-index: 1000; /* Encima de otros elementos */
+        }
+        #player-controls {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        #current-label {
+            font-size: 14px;
+        }
+        #favorite-toggle {
+            padding: 6px 10px;
+            font-size: 16px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            background-color: #ffc107;
+        }
+        #favorite-toggle.favorited {
+            background-color: #e0a800;
+        }
+
+        #favorites-container {
+            margin-top: 120px;
+            background-color: #ffffff;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+        }
+        #favorites-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+        #favorites-list {
+            margin-top: 10px;
+            display: block; /* visible por defecto */
+        }
+        .fav-link {
+            display: block;
+            margin: 4px 0;
+            padding: 8px;
+            background-color: #ffc107;
+            color: #000;
+            text-decoration: none;
+            border-radius: 4px;
+            width: 240px;
+        }
+        .fav-link:hover {
+            background-color: #e0a800;
+        }
+    </style>
+</head>
+<body>
+    <h1>Secuencia de Videos</h1>
+
+    <!-- Reproductor flotante SIEMPRE visible cuando hay canal -->
+    <div id="player-container" style="display: none;">
+        <video id="video-player" controls width="640" height="264"></video>
+        <div id="player-controls">
+            <button id="prev-btn">Anterior</button>
+            <button id="next-btn">Siguiente</button>
+            <span id="current-label"></span>
+            <button id="favorite-toggle">☆</button>
+        </div>
+    </div>
+
+    <!-- Secuencia interna: no mostramos nada, solo generamos y verificamos -->
+    <div id="video-sections" style="display:none;"></div>
+
+    <!-- Favoritos desplegables -->
+    <div id="favorites-container">
+        <div id="favorites-header">
+            <span><strong>Favoritos</strong></span>
+            <button id="toggle-favorites" style="width:auto; margin:0; padding:5px 10px; background-color:#6c757d; color:white; border:none; border-radius:4px; cursor:pointer;">
+                Mostrar/Ocultar
+            </button>
+        </div>
+        <div id="favorites-list"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+        const playerContainer = document.getElementById('player-container');
+        const videoPlayer = document.getElementById('video-player');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+        const favoritesList = document.getElementById('favorites-list');
+        const toggleFavoritesBtn = document.getElementById('toggle-favorites');
+        const currentLabel = document.getElementById('current-label');
+        const favoriteToggle = document.getElementById('favorite-toggle');
+
+        let onlineLinks = [];          // Todos los canales online en orden
+        let onlineLabels = [];         // Etiquetas "Video 001", ...
+        let currentVideoIndex = -1;    // Índice actual dentro de onlineLinks
+        let firstOnlineSet = false;    // Para reproducir automáticamente el primer canal online
+        let hlsInstance = null;
+
+        // Mapa simple URL -> está en favoritos
+        const favoritesSet = new Set();
+
+        // Generar secuencia interna 001-1000 y verificar enlaces (sin mostrar lista)
+        for (let n = 1; n <= 1000; n++) {
+            const numStr = String(n).padStart(3, '0');
+            const networkId = n;
+            const link = `https://stream.ads.ottera.tv/playlist.m3u8?network_id=${networkId}`;
+
+            fetch(link, { method: 'HEAD' })
+                .then(response => {
+                    if (response.ok) {
+                        const label = `Video ${numStr}`;
+
+                        onlineLinks.push(link);
+                        onlineLabels.push(label);
+
+                        // Si es el primer canal online encontrado, lo reproducimos automáticamente
+                        if (!firstOnlineSet) {
+                            firstOnlineSet = true;
+                            openPlayerByIndex(0);
+                        }
+
+                        updateNavigationButtons();
+                    }
+                })
+                .catch(error => {
+                    console.error(`Error al verificar el video ${numStr}:`, error);
+                });
+        }
+
+        function openPlayerByIndex(index) {
+            if (index < 0 || index >= onlineLinks.length) return;
+            currentVideoIndex = index;
+            const videoUrl = onlineLinks[currentVideoIndex];
+            const label = onlineLabels[currentVideoIndex];
+            openPlayer(videoUrl, label);
+            updateNavigationButtons();
+            updateFavoriteToggleState();
+        }
+
+        function openPlayer(videoUrl, label) {
+            playerContainer.style.display = 'block';
+
+            // Etiqueta actual
+            currentLabel.textContent = label ? ` | ${label}` : '';
+
+            // Limpiar instancia HLS previa
+            if (hlsInstance) {
+                hlsInstance.destroy();
+                hlsInstance = null;
+            }
+
+            // Usar Hls.js si es .m3u8 y está soportado
+            if (videoUrl.endsWith('.m3u8') && Hls.isSupported()) {
+                hlsInstance = new Hls();
+                hlsInstance.loadSource(videoUrl);
+                hlsInstance.attachMedia(videoPlayer);
+                hlsInstance.on(Hls.Events.MANIFEST_PARSED, function () {
+                    videoPlayer.play().catch(() => {});
+                });
+            } else {
+                videoPlayer.src = videoUrl;
+                videoPlayer.play().catch(() => {});
+            }
+        }
+
+        function updateNavigationButtons() {
+            prevBtn.disabled = currentVideoIndex <= 0;
+            nextBtn.disabled = currentVideoIndex >= onlineLinks.length - 1 || onlineLinks.length === 0;
+        }
+
+        prevBtn.onclick = () => {
+            if (currentVideoIndex > 0) {
+                openPlayerByIndex(currentVideoIndex - 1);
+            }
+        };
+
+        nextBtn.onclick = () => {
+            if (currentVideoIndex < onlineLinks.length - 1) {
+                openPlayerByIndex(currentVideoIndex + 1);
+            }
+        };
+
+        // ----- Favoritos -----
+
+        function updateFavoriteToggleState() {
+            const url = onlineLinks[currentVideoIndex];
+            const isFav = favoritesSet.has(url);
+            if (isFav) {
+                favoriteToggle.textContent = '★';
+                favoriteToggle.classList.add('favorited');
+            } else {
+                favoriteToggle.textContent = '☆';
+                favoriteToggle.classList.remove('favorited');
+            }
+        }
+
+        favoriteToggle.onclick = () => {
+            if (currentVideoIndex < 0 || currentVideoIndex >= onlineLinks.length) return;
+            const url = onlineLinks[currentVideoIndex];
+            const label = onlineLabels[currentVideoIndex];
+            if (favoritesSet.has(url)) {
+                // Quitar de favoritos
+                favoritesSet.delete(url);
+                removeFavoriteFromList(url);
+            } else {
+                // Añadir a favoritos
+                favoritesSet.add(url);
+                addFavoriteToList(label, url);
+            }
+            updateFavoriteToggleState();
+        };
+
+        function addFavoriteToList(label, url) {
+            // Evitar duplicados visibles
+            const existing = favoritesList.querySelectorAll('a');
+            for (const el of existing) {
+                if (el.dataset.url === url) return;
+            }
+
+            const fav = document.createElement('a');
+            fav.href = url;
+            fav.className = 'fav-link';
+            fav.textContent = label;
+            fav.dataset.url = url;
+            fav.onclick = (e) => {
+                e.preventDefault();
+                const realIndex = onlineLinks.indexOf(url);
+                if (realIndex !== -1) {
+                    openPlayerByIndex(realIndex);
+                } else {
+                    openPlayer(url, label);
+                }
+            };
+            favoritesList.appendChild(fav);
+        }
+
+        function removeFavoriteFromList(url) {
+            const existing = favoritesList.querySelectorAll('a');
+            for (const el of existing) {
+                if (el.dataset.url === url) {
+                    favoritesList.removeChild(el);
+                    break;
+                }
+            }
+        }
+
+        // Mostrar / ocultar contenedor de favoritos (solo la lista)
+        toggleFavoritesBtn.onclick = () => {
+            favoritesList.style.display = (favoritesList.style.display === 'none' || favoritesList.style.display === '') ? 'block' : 'none';
+        };
+    </script>
+</body>
+</html>
